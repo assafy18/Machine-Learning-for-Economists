@@ -1,0 +1,734 @@
+---
+title: "Machine Learning for Economists - Final Project"
+author: "Assaf Yancu"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    code_folding: show
+    theme: flatly
+    highlight: haddock 
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+    keep_md: true
+---
+
+# Introduction
+In this final project, I replicate the key findings from the paper *Vouchers for Private Schooling in Colombia: Evidence from a Randomized Natural Experiment* by by Joshua Angrist, Eric Bettinger, Erik Bloom, Elizabeth King, and Michael Kremer, published in the American Economic Review in 2002. The paper concludes that a voucher program, which partially covered the cost of private secondary school for students who maintained satisfactory academic progress, improved both educational and non-educational outcomes. The authors also tested the heterogeneity of the effect along the gender dimension (i.e., boys vs. girls) and found larger effects for girls in some outcomes.
+
+In this project, I replicate the main results of the paper and extend the heterogeneity analysis by exploring high-dimensional heterogeneous effects using Honest Causal Tree analysis, as covered in the course.  Specifically, I explore the heterogeneous effects on grade repetition and test scores.
+
+
+# Overview and Key Results of the Paper
+The view that private schools outperform public schools in developing countries has led to recommendations for governments in these regions to explore demand-side financing options, such as vouchers. Angrist et al. provide evidence on the effects of one of the largest school voucher initiatives, the Programa de Ampliación de Cobertura de la Educación Secundaria (PACES) in Colombia. This program issued vouchers to over 125,000 students, covering slightly more than half of the cost of private secondary education. The vouchers were renewable contingent on maintaining satisfactory academic performance. Given that many vouchers were distributed through a lottery system, the authors employed a quasi-experimental design to compare the educational and other outcomes of lottery winners and losers. This study represents the first examination of a private school voucher program in a developing country utilizing randomly assigned treatment.
+
+The paper investigates various effects of the voucher program and finds the following:
+
+- Lottery winners were 15 percentage points more likely to attend private schools rather than public schools.
+- They completed an additional 0.1 years of schooling.
+- They were about 10 percentage points more likely than losers to have completed eighth grade, primarily because they repeated fewer grades.
+- They scored approximately 0.2 standard deviations higher on achievement tests compared to losers. This difference is substantial but only marginally significant. The effect is more pronounced and precisely estimated for girls compared to boys.
+- They were less likely to be married or cohabiting.
+- They worked about 1.2 fewer hours per week, with this difference being more notable for girls.
+
+The authors observe that around 90 percent of lottery winners had used the voucher or another form of scholarship, while 24 percent of losers received scholarships from different sources. As a result, they employ the lottery win/loss status as an instrument for scholarship receipt in a two-stage least squares (2SLS) analysis. This method is expected to provide more accurate estimates of the impact of scholarship programs on new recipients compared to the reduced-form effects, which are diluted due to less-than-full take-up rates and the availability of alternative financing. Instrumenting for scholarship
+use with lottery win/loss status suggests that scholarship use generated effects on grade completion and test scores that are about 50 percent larger than the reduced-form effect of winning the lottery.
+
+Additionally, the authors perform a fiscal and cost-benefit analysis of the program. Their key finding is that the benefits to participants likely outweighed the $24 per winner additional cost incurred by the government for providing vouchers instead of public school placements.
+
+The paper primarily focuses on the reduced-form effects observed across various educational outcomes. The authors examine how these effects vary by gender. In this project, I replicated the pooled reduced-form estimates and expanded the heterogeneity analysis by investigating high-dimensional heterogeneous effects using Honest Causal Tree analysis.
+
+# Replication
+To replicate the results related to educational outcomes, I utilized the dataset provided by the `{experimentdatar}` package. This dataset was also used to extend the analysis of heterogeneity. Additionally, I examined the impact of the voucher program on test scores by downloading the relevant dataset from the paper's replication package.
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE,
+                      echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r libraries, message=FALSE, warning=FALSE, echo=FALSE}
+pacman::p_load(tidyverse, haven, Hmisc, dplyr, kableExtra, fixest, modelsummary, tidymodels, causalTree, experimentdatar, rpart.plot, summarytools)
+```
+
+Load the data sets
+```{r load data}
+data("vouchers")
+
+# Main data set
+vouchers <- vouchers %>%
+  rename_with(~ tolower(.)) %>% 
+  filter(!is.na(id))
+
+# Tests data set
+tests <- read_sas("tab5v1.sas7bdat") %>% 
+  rename_with(~ tolower(.))
+```
+
+The authors limit their analysis to the 1995 and 1997 applicant cohorts from Bogotá and the 1993 cohort from Jamundí, a suburb of Cali. These selections were made for both scientific and practical reasons. Bogotá was prioritized because it hosted the largest and most long-standing voucher program, and the survey team was based there. Cali, being the second-largest city in Colombia, was also considered important. However, due to the lack of contact information from many Cali applicants, the focus was shifted to Jamundí, a nearby suburb.
+
+
+## Descriptive statistics
+The authors divide the data into three subsamples for reporting summary statistics:
+
+- Population: All applicants from the three cohorts.
+- Attempted Interviews: Applicants who were targeted for an interview.
+- Completed Interviews: Applicants who were successfully interviewed by the research team.
+```{r}
+# Creating the subsamples
+vouchers_pop <- vouchers %>% filter(dbogota  + djamundi > 0)  # Population:  1995 and 1997 applicant cohorts from Bogotá and the 1993 cohort from Jamundí
+vouchers_pop_bog95 <- vouchers_pop %>% filter(dbogota == 1 & d1995 == 1) # Bogotá 1995
+vouchers_pop_bog97 <- vouchers_pop %>% filter(dbogota == 1 & d1997 == 1) # Bogotá 1997
+vouchers_pop_jam93 <- vouchers_pop %>% filter(djamundi == 1 & d1993 == 1) # Jamundí 1993
+
+# Same for Attempted Interviews
+vouchers_attempt <- vouchers %>% filter(bog95asd + bog97asd + jam93asd > 0)
+vouchers_attempt_bog95 <- vouchers_attempt %>% filter(bog95asd == 1)
+vouchers_attempt_bog97 <- vouchers_attempt %>% filter(bog97asd == 1)
+vouchers_attempt_jam93 <- vouchers_attempt %>% filter(jam93asd == 1)
+
+# Completed Interviews
+vouchers_comp <- vouchers %>% filter(bog95smp + bog97smp + jam93smp > 0)
+vouchers_comp_bog95 <- vouchers_comp %>% filter(bog95smp == 1)
+vouchers_comp_bog97 <- vouchers_comp %>% filter(bog97smp == 1)
+vouchers_comp_jam93 <- vouchers_comp %>% filter(jam93smp == 1)
+
+```
+
+I replicate Table 1 from the paper, which presents the descriptive statistics.
+
+```{r}
+# Panel A
+table1A <- tibble(
+  Variable = c("N", "Percentage awarded vouchers"),
+  `Bogotá 1995` = c(
+    nrow(vouchers_pop_bog95),
+    round(100 * mean(vouchers_pop_bog95$vouch0, na.rm = TRUE), 1)
+  ),
+  `Bogotá 1997` = c(
+    nrow(vouchers_pop_bog97),
+    round(100 * mean(vouchers_pop_bog97$vouch0, na.rm = TRUE), 1)
+  ),
+  `Jamundí 1995` = c(
+    nrow(vouchers_pop_jam93),
+    round(100 * mean(vouchers_pop_jam93$vouch0, na.rm = TRUE), 1)
+  ),
+  `Combined sample` = c(
+    nrow(vouchers_pop),
+    round(100 * mean(vouchers_pop$vouch0, na.rm = TRUE), 1)
+  )
+)
+
+# Panel N
+table1B <- tibble(
+  Variable = c("N", "Percentage awarded vouchers", "Response rate", "Winner rate", "Loser rate"),
+  `Bogotá 1995` = c(
+    nrow(vouchers_attempt_bog95),
+    round(100 * mean(vouchers_attempt_bog95$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_attempt_bog95$response, na.rm = TRUE), 3),
+    round(mean(vouchers_attempt_bog95$response[vouchers_attempt_bog95$vouch0 == 1], na.rm = TRUE),3),
+    round(mean(vouchers_attempt_bog95$response[vouchers_attempt_bog95$vouch0 == 0], na.rm = TRUE),3)
+  ),
+  `Bogotá 1997` = c(
+    nrow(vouchers_attempt_bog97),
+    round(100 * mean(vouchers_attempt_bog97$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_attempt_bog97$response, na.rm = TRUE), 3),
+    round(mean(vouchers_attempt_bog97$response[vouchers_attempt_bog97$vouch0 == 1], na.rm = TRUE),3),
+    round(mean(vouchers_attempt_bog97$response[vouchers_attempt_bog97$vouch0 == 0], na.rm = TRUE),3)
+  ),
+  `Jamundí 1995` = c(
+    nrow(vouchers_attempt_jam93),
+    round(100 * mean(vouchers_attempt_jam93$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_attempt_jam93$response, na.rm = TRUE), 3),
+    round(mean(vouchers_attempt_jam93$response[vouchers_attempt_jam93$vouch0 == 1], na.rm = TRUE),3),
+    round(mean(vouchers_attempt_jam93$response[vouchers_attempt_jam93$vouch0 == 0], na.rm = TRUE),3)
+  ),
+  `Combined sample` = c(
+    nrow(vouchers_attempt),
+    round(100 * mean(vouchers_attempt$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_attempt$response, na.rm = TRUE), 3),
+    round(mean(vouchers_attempt$response[vouchers_attempt$vouch0 == 1], na.rm = TRUE),3),
+    round(mean(vouchers_attempt$response[vouchers_attempt$vouch0 == 0], na.rm = TRUE),3)
+  )
+)
+
+# Panel C
+table1C <- tibble(
+  Variable = c("N", "Percentage awarded vouchers", "Household visit", "Age at time of application", " ", "Age on survey date (from survey data)", " ", "Male", "Started 6th grade in private", "Started 7th grade in private", "Currently in private school", "Highest grade completed", " ", "Currently in school"),
+  
+  `Bogotá 1995` = c(
+    nrow(vouchers_comp_bog95),
+    round(100 * mean(vouchers_comp_bog95$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_comp_bog95$hsvisit, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog95$age2, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_bog95$age2, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp_bog95$age, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_bog95$age, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp_bog95$sex, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog95$prscha_1, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog95$prscha_2, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog95$prsch_c, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog95$scyfnsh, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_bog95$scyfnsh, na.rm = TRUE),3), ")"),
+    round(mean(vouchers_comp_bog95$inschl, na.rm = TRUE),3)
+  ),
+  `Bogotá 1997` = c(
+    nrow(vouchers_comp_bog97),
+    round(100 * mean(vouchers_comp_bog97$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_comp_bog97$hsvisit, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog97$age2, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_bog97$age2, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp_bog97$age, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_bog97$age, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp_bog97$sex, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog97$prscha_1, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog97$prscha_2, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog97$prsch_c, na.rm = TRUE),3),
+    round(mean(vouchers_comp_bog97$scyfnsh, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_bog97$scyfnsh, na.rm = TRUE),3), ")"),
+    round(mean(vouchers_comp_bog97$inschl, na.rm = TRUE),3)
+  ),
+  `Jamundí 1995` = c(
+    nrow(vouchers_comp_jam93),
+    round(100 * mean(vouchers_comp_jam93$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_comp_jam93$hsvisit, na.rm = TRUE),3),
+    round(mean(vouchers_comp_jam93$age2, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_jam93$age2, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp_jam93$age, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_jam93$age, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp_jam93$sex, na.rm = TRUE),3),
+    round(mean(vouchers_comp_jam93$prscha_1, na.rm = TRUE),3),
+    round(mean(vouchers_comp_jam93$prscha_2, na.rm = TRUE),3),
+    round(mean(vouchers_comp_jam93$prsch_c, na.rm = TRUE),3),
+    round(mean(vouchers_comp_jam93$scyfnsh, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp_jam93$scyfnsh, na.rm = TRUE),3), ")"),
+    round(mean(vouchers_comp_jam93$inschl, na.rm = TRUE),3)
+  ),
+  `Combined sample` = c(
+    nrow(vouchers_comp),
+    round(100 * mean(vouchers_comp$vouch0, na.rm = TRUE), 1),
+    round(mean(vouchers_comp$hsvisit, na.rm = TRUE),3),
+    round(mean(vouchers_comp$age2, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp$age2, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp$age, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp$age, na.rm = TRUE),1), ")"),
+    round(mean(vouchers_comp$sex, na.rm = TRUE),3),
+    round(mean(vouchers_comp$prscha_1, na.rm = TRUE),3),
+    round(mean(vouchers_comp$prscha_2, na.rm = TRUE),3),
+    round(mean(vouchers_comp$prsch_c, na.rm = TRUE),3),
+    round(mean(vouchers_comp$scyfnsh, na.rm = TRUE),1),
+    paste0("(",round(sd(vouchers_comp$scyfnsh, na.rm = TRUE),3), ")"),
+    round(mean(vouchers_comp$inschl, na.rm = TRUE),3)
+  ),
+)
+
+table1 <- rbind(table1A, table1B, table1C)
+
+kable(table1,
+      caption = "Table 1—Sample Design and Survey Response Data") %>% 
+  kable_classic(full_width = F) %>% 
+   pack_rows(index = c("A. Population:" = 2, "B. Attempted Interviews:" = 5, "C. Completed Interviews:" = 14)) %>% 
+  footnote("Standard deviations for nonbinary variables are shown in parentheses. Sample sizes may differ across rows. Data are from 1998 household surveys. “Age at time of application” is imputed from the National Identification number reported on the application.")
+
+```
+
+My replication closely mirrors Table 1 from the paper, with minor differences in the combined sample. Additionally, I have not included the last column, "Test-takers," as I was unable to obtain the statistics for this column, despite using the dummy indicator for test-taking.
+
+## Main Results
+The authors estimate the following regression model:
+
+$$
+y_{ic} = X'_i \beta_0 + \alpha_0 Z_i + \delta_c + \epsilon_{ic}
+$$
+
+where $y_ic$ is the dependent variable for child $i$ from application cohort $c$ (defined by city and year); $X_i$ represents a vector of individual and survey characteristics like age, sex, and whether the survey was telephone or in person; $Z_i$ is an indicator for whether child $i$ won the voucher.
+
+The authors estimate the model using three sets of control variables: “no controls,” i.e., excluding the $X_i$ variables; “basic controls” including the $X_i$ variables; and “basic plus barrio controls” which includes the $X_i$ variables plus 19 neighborhood dummies in the Bogota-95 sample.
+
+The main results of the model are presented in Table 3. I do not replicate columns 5 and 6 for the combined sample, as the authors focus on the Bogotá 1995 sample. This is due to the authors' suspicion of non-random assignment of vouchers in the Jamundí-93 sample and because the Bogotá cohort is too recent for a reliable assessment of some outcomes (the survey was conducted in 1998).
+
+```{r}
+vouchers_tab3 <- vouchers_comp %>% filter(tab3smpl == 1)
+vouchers_tab3_bog95 <- vouchers_tab3 %>% filter(bog95 == 1)
+vouchers_tab3_bog95_los <- vouchers_tab3_bog95 %>% filter(vouch0 == 0)
+
+loser_means <- tibble(
+  `Dependent variable` = c(
+    "Using any scholarship in survey year",
+    " ",
+    "Started 6th grade in private",
+    " ",
+    "Started 7th grade in private",
+    " ",
+    "Currently in private school",
+    " ",
+    "Highest grade completed",
+    " ",
+    "Currently in school",
+    " ",
+    "Finished 6th grade",
+    " ",
+    "Finished 7th grade (excludes Bogota 97)",
+    " ",
+    "Finished 8th grade (excludes Bogota 97)",
+    " ",
+    "Repetitions of 6th grade",
+    " ",
+    "Ever repeated after lottery",
+    " ",
+    "Total repetitions since lottery",
+    " ",
+    "Years in school since lottery",
+    " ",
+    "Sample size"
+  ),
+  `(1)` = c(
+    round(mean(vouchers_tab3_bog95_los$usngsch, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$usngsch, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$prscha_1, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$prscha_1, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$prscha_2, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$prscha_2, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$prsch_c, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$prsch_c, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$scyfnsh, na.rm = T),1),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$scyfnsh, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$inschl, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$inschl, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$finish6, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$finish6, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$finish7, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$finish7, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$finish8, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$finish8, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$rept6, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$rept6, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$rept, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$rept, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$nrept, na.rm = T),3),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$nrept, na.rm = T),3), ")"),
+    round(mean(vouchers_tab3_bog95_los$totscyrs, na.rm = T),1),
+    paste0("(", round(sd(vouchers_tab3_bog95_los$totscyrs, na.rm = T),3), ")"),
+    nrow(vouchers_tab3_bog95_los)
+  )
+)
+
+
+# Model 1
+m1 <- vouchers_tab3_bog95 %>% feols(c(usngsch, prscha_1, prscha_2, prsch_c, scyfnsh, inschl, finish6, finish7, finish8, rept6, rept, nrept, totscyrs)
+                                    ~ vouch0, se = "hetero")
+
+# Model 2
+m2 <- vouchers_tab3_bog95 %>% feols(c(usngsch, prscha_1, prscha_2, prsch_c, scyfnsh, inschl, finish6, finish7, finish8, rept6, rept, nrept, totscyrs)
+                                    ~ vouch0
+                                    + svy + hsvisit + phone + age + sex2
+                                    + dmonth2 + dmonth3 + dmonth4 + dmonth5 + dmonth6 + dmonth7 + dmonth8 + dmonth9 + dmonth10 + dmonth11 + dmonth12
+                                    + strata2 + strata3 + strata4 + strata5 + stratams
+                                    , se = "hetero")
+
+# Model 3
+m3 <- vouchers_tab3_bog95 %>% feols(c(usngsch, prscha_1, prscha_2, prsch_c, scyfnsh, inschl, finish6, finish7, finish8, rept6, rept, nrept, totscyrs)
+                                    ~ vouch0
+                                    + svy + hsvisit + phone + age + sex2
+                                    + dmonth2 + dmonth3 + dmonth4 + dmonth5 + dmonth6 + dmonth7 + dmonth8 + dmonth9 + dmonth10 + dmonth11 + dmonth12
+                                    + strata2 + strata3 + strata4 + strata5 + stratams
+                                    + darea1 + darea2 + darea3 + darea4 + darea5 + darea6 + darea7 + darea8 + darea9 + darea10 + darea11 + darea12 + darea13 + darea14 + darea15 + darea16 + darea17 + darea18 + darea19
+                                    , se = "hetero")
+
+
+bog95_results <- tibble(
+  `(2)` = c(
+    round(m1[[1]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[1]]$se["vouch0"], 3), ")"),
+    round(m1[[2]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[2]]$se["vouch0"], 3), ")"),
+    round(m1[[3]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[3]]$se["vouch0"], 3), ")"),
+    round(m1[[4]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[4]]$se["vouch0"], 3), ")"),
+    round(m1[[5]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[5]]$se["vouch0"], 3), ")"),
+    round(m1[[6]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[6]]$se["vouch0"], 3), ")"),
+    round(m1[[7]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[7]]$se["vouch0"], 3), ")"),
+    round(m1[[8]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[8]]$se["vouch0"], 3), ")"),
+    round(m1[[9]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[9]]$se["vouch0"], 3), ")"),
+    round(m1[[10]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[10]]$se["vouch0"], 3), ")"),
+    round(m1[[11]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[11]]$se["vouch0"], 3), ")"),
+    round(m1[[12]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[12]]$se["vouch0"], 3), ")"),
+    round(m1[[13]]$coefficients["vouch0"], 3),
+    paste0("(", round(m1[[13]]$se["vouch0"], 3), ")"),
+    m1[[13]]$nobs
+  ),
+  `(3)` = c(
+  round(m2[[1]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[1]]$se["vouch0"], 3), ")"),
+  round(m2[[2]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[2]]$se["vouch0"], 3), ")"),
+  round(m2[[3]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[3]]$se["vouch0"], 3), ")"),
+  round(m2[[4]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[4]]$se["vouch0"], 3), ")"),
+  round(m2[[5]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[5]]$se["vouch0"], 3), ")"),
+  round(m2[[6]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[6]]$se["vouch0"], 3), ")"),
+  round(m2[[7]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[7]]$se["vouch0"], 3), ")"),
+  round(m2[[8]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[8]]$se["vouch0"], 3), ")"),
+  round(m2[[9]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[9]]$se["vouch0"], 3), ")"),
+  round(m2[[10]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[10]]$se["vouch0"], 3), ")"),
+  round(m2[[11]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[11]]$se["vouch0"], 3), ")"),
+  round(m2[[12]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[12]]$se["vouch0"], 3), ")"),
+  round(m2[[13]]$coefficients["vouch0"], 3),
+  paste0("(", round(m2[[13]]$se["vouch0"], 3), ")"),
+  m2[[13]]$nobs
+  ),
+`(4)` = c(
+  round(m3[[1]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[1]]$se["vouch0"], 3), ")"),
+  round(m3[[2]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[2]]$se["vouch0"], 3), ")"),
+  round(m3[[3]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[3]]$se["vouch0"], 3), ")"),
+  round(m3[[4]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[4]]$se["vouch0"], 3), ")"),
+  round(m3[[5]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[5]]$se["vouch0"], 3), ")"),
+  round(m3[[6]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[6]]$se["vouch0"], 3), ")"),
+  round(m3[[7]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[7]]$se["vouch0"], 3), ")"),
+  round(m3[[8]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[8]]$se["vouch0"], 3), ")"),
+  round(m3[[9]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[9]]$se["vouch0"], 3), ")"),
+  round(m3[[10]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[10]]$se["vouch0"], 3), ")"),
+  round(m3[[11]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[11]]$se["vouch0"], 3), ")"),
+  round(m3[[12]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[12]]$se["vouch0"], 3), ")"),
+  round(m3[[13]]$coefficients["vouch0"], 3),
+  paste0("(", round(m3[[13]]$se["vouch0"], 3), ")"),
+  m3[[12]]$nobs
+  )
+
+)
+
+table3 <- cbind(loser_means, bog95_results)
+
+
+kable(table3,
+      col.names = c(" ", "(1)", "(2)", "(3)", "(4)"),
+      caption = "Table 3 — Educational Outcomes and Voucher Status") %>% 
+  kable_classic(full_width = F) %>% 
+  add_header_above(c(" " = 1, "Loser means" = 1, "No controls" = 1, "Basic controls" = 1, "Basic + 19 barrio controls" = 1)) %>% 
+   add_header_above(c(" " = 1, "Bogota 1995" = 4)) %>% 
+  pack_rows(index = c("Scholarship Use" = 2,"School Choice" = 6, "Schooling" = 18)) %>% 
+  footnote("The table reports voucher losers’ means and the estimated effect of winning a voucher. Numbers in parentheses are standard deviations in the column of means and standard errors in columns of estimated voucher effects. The regression estimates are from models that include controls for phone access, age, type of survey and instrument, strata of residence, and month of interview.") 
+
+```
+
+
+I obtain the same means in column 1 and similar estimates in columns 2 through 4 as reported by Angrist et al. Note that I did not replicate the results for the "ever used a scholarship" variable because the SAS code provided by the authors is unclear regarding this variable. Additionally, the dataset and replication package provided by the authors do not include any label identifying this variable.
+
+Some insights:
+
+- School choice: 
+  - lottery winners were 6–7 percentage points more likely than losers to have begun sixth or seventh grade in private school.
+  - and 15–16 percentage points more likely to be in private school at the
+time of our survey.
+- Schooling:
+  - Winners completed an additional 0.12–0.16 years in comparison to the average of 7.5 among the losers.
+  - The probability of grade repetition was reduced by 5–6 percentage points for lottery winners.
+- The estimates remain stable regardless of the control variables included, which is expected given that the voucher lottery was random.
+
+The authors also estimated the effects on these educational outcomes separately for girls and boys, finding moderately larger effects for girls (see Table 4, which is not replicated in this project).
+
+Private schools have had an incentive to promote pupils with vouchers even if their performance did not meet normal promotional standards. To explore this possibility, the authors also look at effects on test scores and noneducational outcomes. I specifically explore the effect on test scores. The authors conducted tests among the 1995 applicant cohort in three neighborhoods of Bogotá. Out of 1,176 Bogotá applicants surveyed, 473 were invited for testing, and 283 participated. They found that lottery winners scored just over 0.2 standard deviations higher than lottery losers. However, this difference is only marginally significant, which is not surprising given the small sample size (see Table 5, which is not replicated in this project). This result is consistent with the findings from an individual fixed effects model that was also run. Additionally, the authors found evidence of heterogeneity in the treatment effect, with girls experiencing a larger benefit.
+
+# Machine Learning Extension
+Before proceeding with the machine learning extension, I will first provide a summary analysis of the data for both the primary data set (used for educational outcomes) and the test scores data set.
+
+## Data Summary
+### Primary Data Set
+```{r}
+print(dfSummary(vouchers_tab3_bog95), method = "render")
+```
+
+Unsurprisingly, the summary statistics closely resemble the means presented in column 1 of Table 3, which describes the means for lottery losers. This similarity is expected since, as the authors note, the experiment is balanced between treatment and control groups. Nevertheless, here are some key insights:
+
+- The gender distribution is balanced, with an equal number of boys and girls.
+- Participants were mostly 12-13 years old when they applied for the program. Given that they were surveyed in 1998, three years after the lottery, the mean age in the survey data is approximately 15.
+- The average highest grade completed is 7.6.
+- 80% of participants are still in school.
+- 60% are currently enrolled in private schools (`prsch_c`).
+- 90% started 6th grade in private school (`prsch_1`), and 80% started 7th grade in private school (`prsch_2`).
+- The sample is evenly divided between the treatment and control groups (voucher winners and losers).
+- All of the applicants have a phone.
+- The average number of years of parental schooling (`mom_sch` and `dad_sch`) is 6, with a high variance ranging from 5 to 11 years.
+
+### Test Data Set
+```{r}
+print(dfSummary(tests), method = "render")
+```
+
+This dataset descriptively resembles the primary dataset, except for lower values in parental schooling years. Notably, the variables `math`, `reading`, and `writing`, which represent standardized test scores in these subjects, have an average of 0 since they are standardized scores. The same is true for `totalpts`, which represents the total points scored in the tests.
+
+## Causal Tree
+In this section, I extend the analysis of heterogeneity in the effects on grade repetition and test scores by investigating high-dimensional heterogeneous effects using the Honest Causal Tree algorithm.
+The 8th grade graduation outcome has already been explored in the project uploaded to the course website, so I do not include it in this analysis.
+
+The algorithm follows these steps:
+
+1. Randomly divide the sample into two subsets: a training sample and an estimation sample.
+2. Construct a tree using only the training sample. Each split aims to increase treatment heterogeneity (i.e., increase the variability of treatment effect estimates across the resulting subgroups) and reduce estimate variance. In other words, the training sample is used to identify where heterogeneous treatment effects exist.
+3. Using the estimation sample, calculate the treatment effect within each terminal leaf of the tree.
+
+To preform this causal tree algorithm, I use the `{causalTree}` package. In order to use this package, I set the following parameters:
+
+- `minsize`: The minimum number of treatment and control observations in each leaf to *10*, given the small number of observations.
+- `split.Bucket = TRUE` so the observations in a leaf will be partitioned into buckets, with each bucket containing `bucketNum` treated and `bucketNum` control units.
+- I use the default settings for `bucketNum`(5), which specifies the number of observations in each bucket.
+- I set `bucketMax` to *25*, which is the maximum number of buckets used for splitting.
+
+It is important to note that there is a trade-off between the parameter `minsize` the parameters `bucketNum` and `bucketMax`.
+
+### Grade repetition
+The authors report significant difference between girls and boys in the effect of the vouchers program of grade repetition (see Table 4). The estimate for girls is -0.036 (SE = 0.030), which is not statistically significant, while the estimate for boys is −0.083 (SE = 0.034), which is significant.
+Given this difference, I perform the Causal Tree algorithm on the grade repetition outcome.
+
+I first split the data into training and estimation sets:
+```{r}
+set.seed(1234)
+
+split_v <- initial_split(vouchers_tab3_bog95, prop = 0.5)
+
+vouchers_tab3_bog95_train <- training(split_v) %>%
+  select(c(vouch0, rept,
+           sex, age2, hsvisit, svy, phone, mom_sch, dad_sch, starts_with("strata")))
+
+vouchers_tab3_bog95_estim <- testing(split_v) %>%
+  select(c(vouch0, rept,
+           sex, age2, hsvisit, svy, phone, mom_sch, dad_sch, starts_with("strata")))
+```
+
+I include both the training and estimation sets with the dummy variable `rept` for whether the individual ever repeated a grade after the lottery, along with the treatment variable `vouch0.` These sets also include covariates relevant for the heterogeneity analysis, excluding other outcomes of the voucher program and variables that are difficult to interpret, such as the month of the survey and neighborhood dummies.
+In particular, I exclude the indicator for using any scholarship in survey year (`usngsch`) since I am interested in the reduced-form effects. I expect that the first split in the tree would be determined by `usngsch`, given that 90% of the lottery winners had used the voucher or another scholarship.
+I also exclude the `id` variable, as heterogeneity in this dimension is not meaningful. Additionally, I remove all alternative variables related to sex.
+
+Next, I estimate the Causal Tree setting the parameters I listed above.
+
+```{r}
+tree_rept <- honest.causalTree(
+  formula = "rept ~ . - vouch0",
+  data      = vouchers_tab3_bog95_train,
+  treatment = vouchers_tab3_bog95_train$vouch0,
+  est_data      = vouchers_tab3_bog95_estim,
+  est_treatment = vouchers_tab3_bog95_estim$vouch0,
+  split.Rule   = "CT", split.Honest = TRUE,
+  cv.option = "CT", cv.Honest = TRUE,
+  minsize = 10,
+  split.Bucket = TRUE,
+  bucketMax = 25,
+  HonestSampleSize = nrow(vouchers_tab3_bog95_estim)
+)
+```
+Constructing the causal tree:
+```{r}
+# Extracting extract a table of cross-validated values by tuning parameter
+cptable_rept <- as.data.frame(tree_rept$cptable)
+
+# Obtaining the optimal $cp$ to prune the tree
+min_cp_rept <- which.min(cptable_rept$xerror)
+optim_cp_ct_rept <- cptable_rept[min_cp_rept, "CP"]
+
+# Pruning the tree at the optimal $cp$
+pruned_tree_rept <- prune(tree = tree_rept, cp = optim_cp_ct_rept)
+
+# Print the pruned tree
+rpart.plot(pruned_tree_rept)
+```
+
+I obtained a tree with four terminal nodes, all showing negative estimated effects, consistent with the regression analysis conducted by the authors, which estimated a negative effect of (-0.06) to (-0.07). Interestingly, none of the splits were based on the student's gender, which was a key factor in the authors' analysis.
+
+The first split in the tree divides the sample based on whether the age at the time of application was below or above 14. The effect among the older children is slightly more pronounced. The tree further splits the older children by the mother's years of education, showing a larger effect for students with less-educated mothers. The final split is based on the socioeconomic strata (two out of six). As expected, the effect is higher for students from these strata, since the program targeted the two lowest socioeconomic strata.
+
+Finally, estimate the treatment effects (with standard erros) in the estimation set *using the code presented in class*:
+```{r}
+# Form a tibble that holds both the training and estimation samples
+vouchers_tab3_bog95_all <- tibble(
+  sample = c("training", "estimation"),
+  data   = list(vouchers_tab3_bog95_train, vouchers_tab3_bog95_estim)
+)
+
+# Assign each observation in the training and estimation sets to a leaf based on the tree
+vouchers_tab3_bog95_all_leaf <- vouchers_tab3_bog95_all %>% 
+  mutate(leaf = map(data, ~ predict(pruned_tree_rept,
+                        newdata = .x,
+                        type = "vector"))) %>% 
+  mutate(leaf = map(leaf, ~ round(.x, 3))) %>%
+  mutate(leaf = map(leaf, ~ as.factor(.x))) %>%
+  mutate(leaf = map(leaf, ~ enframe(.x, name = NULL, value = "leaf"))) %>% 
+  mutate(data = map2(data, leaf, ~ bind_cols(.x, .y)))
+
+# Employ the lm() function with interaction terms for estimation of the average treatment effect within each leaf and provides confidence intervals
+vouchers_tab3_bog95_all_lm  <- 
+  vouchers_tab3_bog95_all_leaf %>% 
+  mutate(model = map(data, ~ lm(rept ~ leaf + vouch0 * leaf 
+                                - vouch0 - 1, data = .x))) %>% 
+  mutate(tidy = map(model, broom::tidy, conf.int = TRUE)) %>% 
+  unnest(tidy)
+
+# Visualizing Coefficients and Confidence Intervals
+vouchers_tab3_bog95_all_lm %>% 
+  filter(str_detect(term, pattern = ":vouch0")) %>%  # keep only interaction terms
+  ggplot(aes(x = term,
+             y = estimate, 
+             ymin = conf.low,
+             ymax = conf.high
+            )
+  ) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_pointrange(position = position_dodge(width = 1), size = 0.8) +
+  labs(
+    x = "",
+    y = "CATE and confidence interval"
+  ) +
+  facet_grid(. ~ sample) +
+  coord_flip()
+
+
+```
+
+First, I noticed that the titles for the plots are incorrect. The estimates in the left graph correspond to the estimates shown in the leaf names, so I interpret the left plot as representing the results for the training set and the right plot as representing the results for the estimation set.
+
+Overall, the estimates obtained from the estimation sample for all four leaves have the same sign as those from the training set, indicating that the causal tree algorithm is relatively "honest." Only the second leaf is statistically significant. This leaf includes individuals who were at least 14 when they applied to the program, whose mothers had relatively high schooling years, and who are from the second socioeconomic stratum. This effect is statistically significant, even though this leaf represents only 8% of the sample. However, notably, the results for the third leaf, which includes individuals younger than 14 at the time of application and comprises 78% of the observations, are not statistically significant.
+
+### Test Scores
+The authors find a significant difference in the effect of the voucher program on test scores between girls and boys (see Table 5).The estimate for girls is 0.263 (SE = 0.126), which is statistically significant, while the estimate for boys is 0.170 (SE = 0.189), which is insignificant.
+Given this difference, I perform the Causal Tree algorithm on the test scores.
+
+I first split the data into training and estimation sets:
+```{r}
+split_t <- initial_split(tests, prop = 0.5)
+
+tests_train <- training(split_t) %>%
+  select(c(vouch0, totalpts,
+           sex, age2, hsvisit, svy, phone, mom_sch, dad_sch, starts_with("strata")))
+
+tests_estim <- testing(split_t) %>%
+  select(c(vouch0, totalpts,
+           sex, age2, hsvisit, svy, phone, mom_sch, dad_sch, starts_with("strata")))
+```
+
+In this analysis, I include both the training and estimation sets with the dummy variable `totalpts`, which represents the standardized scores for the total points in the test. I retain the same variables as in the analysis of grade repetition.
+
+Next, I estimate the Causal Tree, only changing the parameter of `minsize` to 5 due to the smaller number of observations in the test dataset.
+
+```{r}
+tree_tests <- honest.causalTree(
+  formula = "totalpts ~ . - vouch0",
+  data      = tests_train,
+  treatment = tests_train$vouch0,
+  est_data      = tests_estim,
+  est_treatment = tests_estim$vouch0,
+  split.Rule   = "CT", split.Honest = TRUE,
+  cv.option = "CT", cv.Honest = TRUE,
+  minsize = 5,
+  split.Bucket = TRUE,
+  bucketMax = 20,
+  HonestSampleSize = nrow(tests_estim)
+)
+```
+Constructing the causal tree:
+```{r}
+# Extracting extract a table of cross-validated values by tuning parameter
+cptable_tests <- as.data.frame(tree_tests$cptable)
+
+# Obtaining the optimal $cp$ to prune the tree
+min_cp_tests <- which.min(cptable_tests$xerror)
+optim_cp_ct_tests <- cptable_tests[min_cp_tests, "CP"]
+
+# Pruning the tree at the optimal $cp$
+pruned_tree_tests <- prune(tree = tree_tests, cp = optim_cp_ct_tests)
+
+# Print the pruned tree
+rpart.plot(pruned_tree_tests)
+```
+
+I obtained a tree with five terminal nodes, all but one showing positive estimated effects, consistent with the regression analysis conducted by the authors, which estimated a positive effect of 0.2. Interestingly, none of the splits were based on the student's gender, which was a key factor in the authors' analysis.
+
+The first split in the tree divides the sample based on whether the survey was completed using the new version. This indicates a selection for the new version since filling the new version should not be the "reason" for this heterogeneity. The tree then further splits the students who completed the older version of the survey based on whether their age at the time of application was below or above 12, with a more pronounced effect among the younger children. The tree continues by splitting the older children based on their mother's years of education, showing a larger effect for students with less-educated mothers. The final split is based on the father's years of education, revealing a high positive effect for students with less-educated fathers and a negative effect for the complementary group (consistent with the heterogeneity in the split above).
+
+Finally, estimate the treatment effects (with standard erros) in the estimation set:
+```{r}
+# Form a tibble that holds both the training and estimation samples
+tests_all <- tibble(
+  sample = c("training", "estimation"),
+  data   = list(tests_train, tests_estim)
+)
+
+# Assign each observation in the training and estimation sets to a leaf based on the tree
+tests_all_leaf <- tests_all %>% 
+  mutate(leaf = map(data, ~ predict(pruned_tree_tests,
+                        newdata = .x,
+                        type = "vector"))) %>% 
+  mutate(leaf = map(leaf, ~ round(.x, 3))) %>%
+  mutate(leaf = map(leaf, ~ as.factor(.x))) %>%
+  mutate(leaf = map(leaf, ~ enframe(.x, name = NULL, value = "leaf"))) %>% 
+  mutate(data = map2(data, leaf, ~ bind_cols(.x, .y)))
+
+# Employ the lm() function with interaction terms for estimation of the average treatment effect within each leaf and provides confidence intervals
+tests_all_lm  <- 
+  tests_all_leaf %>% 
+  mutate(model = map(data, ~ lm(totalpts ~ leaf + vouch0 * leaf 
+                                - vouch0 - 1, data = .x))) %>% 
+  mutate(tidy = map(model, broom::tidy, conf.int = TRUE)) %>% 
+  unnest(tidy) %>% 
+  mutate()
+
+# Visualizing Coefficients and Confidence Intervals
+tests_all_lm %>% 
+  filter(str_detect(term, pattern = ":vouch0")) %>%  # keep only interaction terms
+  ggplot(aes(x = term,
+             y = estimate, 
+             ymin = conf.low,
+             ymax = conf.high
+            )
+  ) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_pointrange(position = position_dodge(width = 1), size = 0.8) +
+  labs(
+    x = "",
+    y = "CATE and confidence interval"
+  ) +
+  facet_grid(. ~ sample) +
+  coord_flip()
+
+
+```
+
+In this case, the estimates obtained from the estimation set differ significantly from those obtained from the training set. I attribute this discrepancy to the small number of individuals who took the test (283).
+
+Statistical significance is observed only in leaves 4 and 5. Leaf 4 includes individuals who completed the new version of the survey. However, the estimated effect for this leaf is largely negative, contrasting with the slightly positive effect observed in the training set. Leaf 5 comprises individuals who did not take the new version of the survey, were younger than 12 at the time of application, and whose parents are relatively more educated. Here, the estimated effect is largely positive, whereas it was negative in the training set.
+
+
+# Conclusion
+In this project, I replicated several results from the paper *Vouchers for Private Schooling in Colombia: Evidence from a Randomized Natural Experiment*.  Specifically, I reproduced the descriptive statistics and the reduced-form effects of the voucher program on various educational outcomes. Additionally, I extended the analysis of gender heterogeneity in the treatment effects by applying Honest Causal Tree Analysis to explore high-dimensional heterogeneous effects.
+
+Interestingly, the Honest Causal Tree results did not reveal significant heterogeneity by gender in the effects on grade repetition and test scores. For grade repetition, I observed marginally statistically significant heterogeneity based on the interaction of age, mother’s education, and socioeconomic status. However, the results for test scores were less compelling. Despite being statistically significant, the effects did not align with those observed in the training set. It is important to note that the study’s limited sample size affects the statistical power, especially with the Honest Causal Tree algorithm, which divides the small sample into even smaller subsets. To better understand the underlying mechanisms of the voucher program's effects, future research should utilize larger quasi-experiments or other identification strategies that offer greater statistical power for analyzing heterogeneous treatment effects.
